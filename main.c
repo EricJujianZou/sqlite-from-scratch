@@ -9,7 +9,7 @@
 // statement type is to distinguish between the two.
 typedef enum {META_COMMAND_SUCCESS, META_COMMAND_UNRECOGNIZED_COMMAND} MetaCommandResult;
 
-typedef enum {PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_COMMAND} PrepareResult;
+typedef enum {PREPARE_SUCCESS, PREPARE_NEGATIVE_ID, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_COMMAND, PREPARE_STRING_TOO_LONG} PrepareResult;
 
 // So these 2 are macros.
 // they basically replace the string "COLUMN_USERNAME_SIZE" with the number 32
@@ -26,8 +26,8 @@ typedef enum {PREPARE_SUCCESS, PREPARE_SYNTAX_ERROR, PREPARE_UNRECOGNIZED_COMMAN
 
 typedef struct{
 	uint32_t id;
-	char username [COLUMN_USERNAME_SIZE];
-	char email [COLUMN_EMAIL_SIZE];
+	char username [COLUMN_USERNAME_SIZE+1];
+	char email [COLUMN_EMAIL_SIZE+1];
 }Row;
 
 typedef enum { EXECUTE_SUCCESS, EXECUTE_TABLE_FULL } ExecuteResult;
@@ -83,6 +83,8 @@ void* row_slot(Table*table, uint32_t row_num){
 	void* page = table-> pages[page_num];
 	if (page == NULL){
 		//allocate memory only when we try to access the page
+		page = table->pages[page_num] = malloc(PAGE_SIZE);
+
 	}
 	uint32_t row_offset = row_num % ROWS_PER_PAGE;
 	uint32_t byte_offset = row_offset * ROW_SIZE;
@@ -155,25 +157,51 @@ MetaCommandResult do_meta_command(InputBuffer* input_buffer, Table *table){
 		return META_COMMAND_UNRECOGNIZED_COMMAND;
 	}
 }
+
+
+//helper to handle string sizes larger than the buffer to prevent buffer overflow.
+PrepareResult prepare_insert(InputBuffer* input_buffer,Statement* statement){
+	statement->type = STATEMENT_INSERT;
+
+	char* keyword = strtok(input_buffer->buffer, " "); // first check put entire string in there
+	char* id_string = strtok(NULL, " ");
+	char* username = strtok(NULL, " ");
+	char* email = strtok(NULL, " ");
+	if (id_string == NULL || username == NULL || email == NULL){
+			return PREPARE_SYNTAX_ERROR; // null check for valid statement, not just a fragment of the valid statement to 
+			//prevent seg faults
+	}
+	int id = atoi(id_string); //convert from string (ASCII) to int.
+	if (id < 0){
+		return PREPARE_NEGATIVE_ID;
+	}
+	if (strlen(username) > COLUMN_USERNAME_SIZE){
+		return PREPARE_STRING_TOO_LONG;
+	}
+	if (strlen(email)> COLUMN_EMAIL_SIZE){
+		return PREPARE_STRING_TOO_LONG;
+	}
+
+	statement -> row_to_insert.id = id;
+	strcpy(statement->row_to_insert.username, username);
+	strcpy(statement->row_to_insert.email, email);
+	return PREPARE_SUCCESS;
+}
 //statement passing in the address because we need to modify on heap, and have it persist out of scope of fxn
 // we used strncmp with an "N" to compare number of characters, which is 6.
 PrepareResult prepare_statement(InputBuffer* input_buffer, Statement* statement){
 	if (strncmp(input_buffer -> buffer, "insert", 6) == 0){
-		statement->type = STATEMENT_INSERT;
-		int args_assigned = sscanf(
-			input_buffer -> buffer, "insert %d %s %s", &(statement->row_to_insert.id),
-			statement->row_to_insert.username, statement-> row_to_insert.email);
-		if (args_assigned < 3){
-			return PREPARE_SYNTAX_ERROR;
-		}
-		return PREPARE_SUCCESS;
+		return prepare_insert(input_buffer, statement);
+		
 	}
-	if (strcmp(input_buffer -> buffer, "select") == 0){
-		statement->type = STATEMENT_SELECT;
-		return PREPARE_SUCCESS;
-	}
-	return PREPARE_UNRECOGNIZED_COMMAND;
+	if (strcmp(input_buffer->buffer, "select") == 0){
+        statement->type = STATEMENT_SELECT;
+        return PREPARE_SUCCESS;
+    }
+    return PREPARE_UNRECOGNIZED_COMMAND;
 }
+
+
 
 ExecuteResult execute_insert(Statement*statement, Table *table){
 	if (table->num_rows >= TABLE_MAX_ROWS){
@@ -244,6 +272,12 @@ int main(int argc, char* argv[]){
 		switch (prepare_statement(input_buffer, &statement)){
 			case (PREPARE_SUCCESS):
 				break;
+			case (PREPARE_STRING_TOO_LONG):
+				printf("String is too long.\n");
+				continue;
+			case (PREPARE_NEGATIVE_ID):
+				printf("ID must be positive.\n");
+				continue;
 			case (PREPARE_SYNTAX_ERROR):
 				printf("Syntax error. Could not parse satement. \n");
 				continue;
@@ -253,10 +287,10 @@ int main(int argc, char* argv[]){
 		}
 		switch (execute_statement(&statement, table)){
 			case (EXECUTE_SUCCESS):
-				printf("Executed. \n");
+				printf("Executed.\n");
 				break;
 			case(EXECUTE_TABLE_FULL):
-				printf("Error: table full .\n");
+				printf("Error: Table full.\n");
 				break;
 		}
 	}
